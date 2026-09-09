@@ -17,15 +17,36 @@ class EventSanitizationPipeline:
 
     def scrub_event_payload(self, event_envelope: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"Auditing event {event_envelope.get('event_id')} for restricted attributes...")
-        
+
         attributes = event_envelope.get("attributes", {})
 
-        # FAILS HERE: Mutating a dictionary while actively iterating over it
-        # Raises RuntimeError: dictionary changed size during iteration
-        for attr_name in attributes:
+        # Pre-pass: log every restricted key that is about to be purged
+        for attr_name, attr_value in attributes.items():
             if attr_name.lower() in self.restricted_keys:
                 logger.warning(f"Purging sensitive attribute: {attr_name}")
-                del attributes[attr_name]
+
+        # Rebuild the attributes dict in a single comprehension pass, excluding
+        # any restricted PII keys.  This avoids mutating the dict while an
+        # iterator is open on it (which caused RuntimeError in the original code).
+        event_envelope["attributes"] = {
+            k: v for k, v in attributes.items()
+            if k.lower() not in self.restricted_keys
+        }
+
+        # Post-sanitization audit: confirm no restricted keys remain
+        remaining_restricted = [
+            k for k in event_envelope["attributes"]
+            if k.lower() in self.restricted_keys
+        ]
+        if remaining_restricted:
+            logger.error(
+                f"BUG: restricted keys still present after scrub: {remaining_restricted}"
+            )
+        else:
+            logger.info(
+                f"Event {event_envelope.get('event_id')} sanitized successfully. "
+                f"No restricted keys remain in attributes."
+            )
 
         return event_envelope
 
