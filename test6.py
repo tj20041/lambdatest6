@@ -17,15 +17,21 @@ class EventSanitizationPipeline:
 
     def scrub_event_payload(self, event_envelope: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"Auditing event {event_envelope.get('event_id')} for restricted attributes...")
-        
+
         attributes = event_envelope.get("attributes", {})
 
-        # FAILS HERE: Mutating a dictionary while actively iterating over it
-        # Raises RuntimeError: dictionary changed size during iteration
-        for attr_name in attributes:
+        # FIX: Iterating over a static snapshot of keys (list(attributes.keys()))
+        # instead of the live dictionary avoids mutating the object while it is
+        # being iterated, which previously raised:
+        # RuntimeError: dictionary changed size during iteration
+        sanitized_attributes: Dict[str, Any] = {}
+        for attr_name in list(attributes.keys()):
             if attr_name.lower() in self.restricted_keys:
                 logger.warning(f"Purging sensitive attribute: {attr_name}")
-                del attributes[attr_name]
+                continue
+            sanitized_attributes[attr_name] = attributes[attr_name]
+
+        event_envelope["attributes"] = sanitized_attributes
 
         return event_envelope
 
@@ -46,7 +52,21 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     }
 
     pipeline = EventSanitizationPipeline(restricted_keys=RESTRICTED_PII_FIELDS)
-    sanitized_envelope = pipeline.scrub_event_payload(simulated_event)
+
+    try:
+        sanitized_envelope = pipeline.scrub_event_payload(simulated_event)
+    except RuntimeError as exc:
+        logger.error(
+            f"RuntimeError while sanitizing event_id={simulated_event.get('event_id')} "
+            f"tenant_id={simulated_event.get('tenant_id')}: {exc}"
+        )
+        return {"statusCode": 500, "error": str(exc)}
+    except Exception as exc:
+        logger.error(
+            f"Unexpected error while sanitizing event_id={simulated_event.get('event_id')} "
+            f"tenant_id={simulated_event.get('tenant_id')}: {exc}"
+        )
+        return {"statusCode": 500, "error": str(exc)}
 
     logger.info("Sanitization complete. Event ready for downstream distribution.")
     return {"statusCode": 200, "cleaned_event": sanitized_envelope}
